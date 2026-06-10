@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Track your order — Waybill</title>
+<link rel="stylesheet" href="/assets/base.css">
+<style>
+  body { background: var(--carton);
+    background-image: repeating-linear-gradient(45deg, transparent, transparent 34px, rgba(40,35,26,.025) 34px, rgba(40,35,26,.025) 36px); }
+  .wrap { max-width: 520px; }
+  .hero { text-align: center; padding: 28px 0 8px; }
+  .hero .logo { font-family: var(--font-display); font-size: 30px; font-weight: 700; letter-spacing: 3px; text-transform: uppercase; }
+  .hero .logo small { display: block; font-family: var(--font-mono); font-size: 11px; letter-spacing: 2px; color: var(--safety); margin-top: 2px; }
+  .lookup { display: flex; gap: 8px; margin-top: 6px; }
+  .lookup input { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 1px; }
+  /* Timeline */
+  .timeline { list-style: none; padding: 4px 0; }
+  .step { display: flex; gap: 14px; position: relative; padding-bottom: 22px; }
+  .step:last-child { padding-bottom: 0; }
+  .step::before { content: ''; position: absolute; left: 13px; top: 28px; bottom: -4px; width: 2px; background: var(--line); }
+  .step:last-child::before { display: none; }
+  .dot { width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--line); background: var(--paper); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 1; }
+  .step.done .dot { background: var(--stamp); border-color: var(--stamp); color: #fff; }
+  .step.current .dot { background: var(--safety); border-color: var(--safety-dark); color: #fff; animation: pulse 1.6s ease-in-out infinite; }
+  .step.current.delayed .dot { background: var(--alert); border-color: var(--alert); }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(232,89,12,.4); } 50% { box-shadow: 0 0 0 6px rgba(232,89,12,0); } }
+  @media (prefers-reduced-motion: reduce) { .step.current .dot { animation: none; } }
+  .step .body { padding-top: 3px; }
+  .step .title { font-family: var(--font-display); text-transform: uppercase; letter-spacing: 1px; font-weight: 700; font-size: 15px; }
+  .step.pending .title { color: var(--ink-soft); opacity: .6; }
+  .step .when { font-size: 12px; color: var(--ink-soft); }
+  .delay-banner { background: #fde8e8; border: 1.5px solid var(--alert); color: var(--alert); border-radius: var(--radius); padding: 11px 13px; font-size: 14px; margin-bottom: 14px; }
+  .receipt-head { display: flex; justify-content: space-between; align-items: flex-start; }
+  .err-msg { text-align: center; color: var(--ink-soft); padding: 24px 10px; }
+  .barcode { margin-top: 14px; height: 26px; background: repeating-linear-gradient(90deg, var(--ink) 0 2px, transparent 2px 5px, var(--ink) 5px 6px, transparent 6px 10px); opacity: .55; }
+  #result { display: none; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div class="logo">Waybill<small>ORDER TRACKING</small></div>
+    </div>
+
+    <div class="card">
+      <label for="ref">Enter your order code</label>
+      <div class="lookup">
+        <input id="ref" placeholder="ORD-XXXXXX" autocomplete="off" spellcheck="false">
+        <button class="btn primary" onclick="track()">Track</button>
+      </div>
+      <p class="muted" style="margin-top:8px">Your code looks like <span class="mono">ORD-AB3CD9</span> — you get it the moment you place an order. <a href="/order.html">Place a new order →</a></p>
+    </div>
+
+    <div class="card" id="result">
+      <div class="receipt-head">
+        <div>
+          <h2 style="margin:0">Order <span class="ref" id="rRef"></span></h2>
+          <p class="muted" id="rMeta" style="margin:2px 0 0"></p>
+        </div>
+        <span class="stamp" id="rStamp"></span>
+      </div>
+      <hr class="tear">
+      <div class="delay-banner" id="rDelay" style="display:none"></div>
+      <ul class="timeline" id="timeline"></ul>
+      <hr class="tear">
+      <div class="mono muted" id="rItems"></div>
+      <div class="barcode" aria-hidden="true"></div>
+    </div>
+
+    <div class="card" id="errCard" style="display:none">
+      <div class="err-msg" id="errText"></div>
+    </div>
+  </div>
+
+<script src="/assets/app.js"></script>
+<script>
+  const STAGES = [
+    { key: 'received',  title: 'Order received',  icon: '📦' },
+    { key: 'preparing', title: 'Preparing order', icon: '🔧' },
+    { key: 'out',       title: 'Out for delivery', icon: '🚚' },
+    { key: 'delivered', title: 'Delivered',        icon: '✅' },
+  ];
+  const STAGE_STAMP = { received: 'packed', preparing: 'picking', out: 'in_transit', delivered: 'delivered', delayed: 'exception' };
+  const STAGE_LABEL = { received: 'Received', preparing: 'Preparing', out: 'Out for delivery', delivered: 'Delivered', delayed: 'Delayed' };
+
+  function fmtDate(iso) {
+    const d = new Date(iso + (iso.includes('Z') || iso.includes('+') ? '' : 'Z'));
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
+  async function track() {
+    const ref = document.getElementById('ref').value.trim();
+    if (!ref) return;
+    const result = document.getElementById('result');
+    const errCard = document.getElementById('errCard');
+    result.style.display = 'none'; errCard.style.display = 'none';
+    try {
+      const o = await fetch('/api/track/' + encodeURIComponent(ref)).then(r => r.json().then(d => {
+        if (!r.ok) throw new Error(d.error || 'Not found'); return d;
+      }));
+      render(o);
+    } catch (e) {
+      document.getElementById('errText').textContent = e.message;
+      errCard.style.display = 'block';
+    }
+  }
+
+  function render(o) {
+    const delayed = o.stage === 'delayed';
+    // when delayed, the order is still mid-delivery — show progress up to "out"
+    const effectiveStage = delayed ? 'out' : o.stage;
+    const idx = STAGES.findIndex(s => s.key === effectiveStage);
+
+    document.getElementById('rRef').textContent = o.ref;
+    document.getElementById('rMeta').textContent = `${o.customer} · ${o.destination}` + (o.priority === 'express' ? ' · express' : '');
+    document.getElementById('rItems').textContent = '📦 ' + o.items;
+
+    const stampEl = document.getElementById('rStamp');
+    stampEl.className = 'stamp ' + STAGE_STAMP[o.stage];
+    stampEl.textContent = STAGE_LABEL[o.stage];
+
+    const delayBox = document.getElementById('rDelay');
+    if (delayed) {
+      delayBox.style.display = 'block';
+      delayBox.textContent = '⏳ ' + (o.delayNote || 'Your delivery is running a little late. We\u2019re on it.');
+    } else delayBox.style.display = 'none';
+
+    document.getElementById('timeline').innerHTML = STAGES.map((s, i) => {
+      let cls = i < idx ? 'done' : i === idx ? 'current' : 'pending';
+      if (i === idx && delayed) cls += ' delayed';
+      const when = i === idx ? `<div class="when">Updated ${fmtDate(o.updated_at)}</div>`
+        : i === 0 ? `<div class="when">${fmtDate(o.placed_at)}</div>` : '';
+      const icon = i < idx ? '✓' : s.icon;
+      return `<li class="step ${cls}">
+        <div class="dot">${icon}</div>
+        <div class="body"><div class="title">${s.title}</div>${when}</div>
+      </li>`;
+    }).join('');
+
+    document.getElementById('result').style.display = 'block';
+  }
+
+  document.getElementById('ref').addEventListener('keydown', (e) => { if (e.key === 'Enter') track(); });
+  // Deep link: /track.html?ref=ORD-XXXXXX (used by Discord track links)
+  const pre = new URLSearchParams(location.search).get('ref');
+  if (pre) { document.getElementById('ref').value = pre; track(); }
+</script>
+</body>
+</html>

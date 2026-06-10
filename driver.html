@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waybill — Driver</title>
+<link rel="stylesheet" href="/assets/base.css">
+<style>
+  /* Night cab variant */
+  body { background: #1d1a15; color: var(--kraft); }
+  .wrap { max-width: 560px; }
+  .card { background: #2a261f; border-color: #4a4334; box-shadow: 3px 3px 0 rgba(0,0,0,.4); color: var(--kraft); }
+  .card .tear { border-top-color: #4a4334; }
+  .muted { color: #a89e89; }
+  h1 { color: var(--kraft); }
+  .sub { color: #a89e89; }
+  .dest { font-size: 18px; font-weight: 600; margin: 2px 0 4px; }
+  .bigbtn { width: 100%; padding: 16px; font-size: 16px; margin-top: 12px; }
+  .btn { background: #2a261f; color: var(--kraft); border-color: #4a4334; box-shadow: 2px 2px 0 rgba(0,0,0,.4); }
+  .btn.primary { background: var(--safety); border-color: var(--safety-dark); color: #fff; }
+  .btn.danger { background: #3a2020; border-color: var(--alert); color: #f3b8b8; }
+  .stamp.in_transit { color: #ff8d4d; }
+  .stamp.assigned { color: #7db4ec; }
+  .stamp.delivered { color: #7fd1a0; }
+  .stamp.exception { color: #f08c8c; background: #3a2020; }
+  .empty { text-align: center; padding: 48px 16px; color: #a89e89; }
+  .empty .big-icon { font-size: 44px; margin-bottom: 10px; }
+  .filterrow { display: flex; gap: 8px; margin-bottom: 16px; }
+  .filterrow button { flex: 1; font-family: var(--font-display); text-transform: uppercase; letter-spacing: 1px; font-size: 13px; font-weight: 700; padding: 9px; background: transparent; border: 1.5px solid #4a4334; border-radius: var(--radius); color: #a89e89; cursor: pointer; }
+  .filterrow button.active { border-color: var(--safety); color: var(--safety); }
+  textarea { background: #1d1a15; border-color: #4a4334; color: var(--kraft); }
+  dialog { background: #2a261f; color: var(--kraft); border: 1.5px solid #4a4334; border-radius: var(--radius); padding: 20px; width: min(92vw, 420px); }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">Waybill <span class="tag">DRIVER</span></div>
+    <div class="who"><span id="who"></span><button onclick="logout()">Clock out</button></div>
+  </div>
+  <div class="wrap">
+    <h1>My runs</h1>
+    <p class="sub">Tap a job to update its status. Dispatch sees every change instantly.</p>
+    <div class="filterrow">
+      <button class="active" data-f="open" onclick="setFilter('open',this)">Open</button>
+      <button data-f="done" onclick="setFilter('done',this)">Completed</button>
+    </div>
+    <div id="list"></div>
+  </div>
+
+  <dialog id="excDialog">
+    <h2 style="margin-top:0">Flag exception</h2>
+    <p class="muted">What's blocking this delivery? Dispatch gets pinged on Discord.</p>
+    <textarea id="excNote" rows="3" placeholder="e.g. road blocked, customer not at location..."></textarea>
+    <div class="row" style="margin-top:14px;justify-content:flex-end">
+      <button class="btn" onclick="excDialog.close()">Cancel</button>
+      <button class="btn danger" onclick="submitException()">Flag it</button>
+    </div>
+  </dialog>
+
+<script src="/assets/app.js"></script>
+<script>
+  const me = requireRole('driver');
+  document.getElementById('who').textContent = me.name;
+  let jobs = [], filter = 'open', excJobId = null;
+
+  function setFilter(f, btn) {
+    filter = f;
+    document.querySelectorAll('.filterrow button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    render();
+  }
+
+  async function load() {
+    try { jobs = await API.get('/jobs'); render(); }
+    catch (e) { toast(e.message, true); }
+  }
+
+  function actionFor(j) {
+    if (j.status === 'assigned')
+      return `<button class="btn primary bigbtn" onclick="advance(${j.id},'in_transit')">▶ Start run</button>`;
+    if (j.status === 'in_transit')
+      return `<button class="btn primary bigbtn" onclick="advance(${j.id},'delivered')">✓ Mark delivered</button>
+              <button class="btn danger bigbtn" onclick="openException(${j.id})">⚠ Flag exception</button>`;
+    if (j.status === 'exception')
+      return `<p class="muted" style="margin-top:10px">⚠ ${esc(j.notes)} — waiting on dispatch</p>`;
+    return '';
+  }
+
+  function render() {
+    const open = ['assigned', 'in_transit', 'exception'];
+    const shown = jobs.filter(j => filter === 'open' ? open.includes(j.status) : j.status === 'delivered');
+    const list = document.getElementById('list');
+    if (!shown.length) {
+      list.innerHTML = `<div class="empty"><div class="big-icon">🚚</div>${filter === 'open' ? 'No runs assigned right now.<br>Dispatch will load you up soon.' : 'No completed runs yet.'}</div>`;
+      return;
+    }
+    list.innerHTML = shown.map(j => `
+      <div class="card">
+        <div class="spread">
+          <span class="ref">${esc(j.ref)}</span>
+          ${stamp(j.status)}
+        </div>
+        <div class="dest">📍 ${esc(j.destination)}</div>
+        <div class="muted">${esc(j.customer)} · from ${esc(j.warehouse_name)} (${esc(j.warehouse_code)})</div>
+        <hr class="tear">
+        <div class="mono muted">📦 ${esc(j.items)}</div>
+        ${j.priority === 'express' ? '<div style="margin-top:8px"><span class="stamp in_transit">Express</span></div>' : ''}
+        ${actionFor(j)}
+        <div class="muted" style="margin-top:10px;font-size:12px">Updated ${timeAgo(j.updated_at)}</div>
+      </div>
+    `).join('');
+  }
+
+  async function advance(id, status) {
+    try {
+      await API.patch(`/jobs/${id}/status`, { status });
+      toast(status === 'delivered' ? 'Delivered — nice work 🎉' : 'Run started');
+      load();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  function openException(id) {
+    excJobId = id;
+    document.getElementById('excNote').value = '';
+    excDialog.showModal();
+  }
+
+  async function submitException() {
+    const note = document.getElementById('excNote').value.trim();
+    if (!note) return toast('Add a short note first', true);
+    try {
+      await API.patch(`/jobs/${excJobId}/status`, { status: 'exception', note });
+      excDialog.close();
+      toast('Exception flagged — dispatch notified');
+      load();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  load();
+  setInterval(load, 15000);
+</script>
+</body>
+</html>
